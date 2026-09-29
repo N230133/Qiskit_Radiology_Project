@@ -14,6 +14,7 @@ No Flask backend is needed for this deployment version.
 import io
 import os
 import pickle
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -24,7 +25,6 @@ import torch.nn as nn
 from PIL import Image
 
 from image_validator import validate_chest_xray_image
-from pathlib import Path
 
 
 # ============================================================
@@ -40,20 +40,24 @@ st.set_page_config(
 
 
 # ============================================================
-# File names
+# Model file paths
+#
+# BASE_DIR is the folder containing this dashboard.py file.
+# In your GitHub repository, it is:
+# Qiskit_Radiology_Project/Radiology_Project/
 # ============================================================
 
+BASE_DIR = Path(__file__).resolve().parent
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+QUANTUM_MODEL_FILE = BASE_DIR / "quantum_model.pkl"
+PCA_MODEL_FILE = BASE_DIR / "pca_model.pkl"
+SCALED_TRAIN_FILE = BASE_DIR / "quantum_train_features_scaled.npy"
+CLASSICAL_MODEL_FILE = BASE_DIR / "classical_cnn.pth"
 
-QUANTUM_MODEL_FILE = PROJECT_ROOT / "quantum_model.pkl"
-PCA_MODEL_FILE = PROJECT_ROOT / "pca_model.pkl"
-SCALED_TRAIN_FILE = PROJECT_ROOT / "quantum_train_features_scaled.npy"
-CLASSICAL_MODEL_FILE = PROJECT_ROOT / "classical_cnn.pth"
 
 # ============================================================
 # CNN architecture
-# Must match the training architecture exactly
+# Must match classical_baseline.py exactly
 # ============================================================
 
 class CNNBackbone(nn.Module):
@@ -115,7 +119,7 @@ class ClassicalCNN(nn.Module):
 
 
 # ============================================================
-# Load models once per Streamlit server
+# Load models once
 # ============================================================
 
 @st.cache_resource
@@ -128,15 +132,20 @@ def load_models():
     ]
 
     missing_files = [
-        filename
-        for filename in required_files
-        if not os.path.exists(filename)
+        file_path
+        for file_path in required_files
+        if not file_path.exists()
     ]
 
     if missing_files:
+        readable_missing_files = "\n".join(
+            str(file_path)
+            for file_path in missing_files
+        )
+
         raise FileNotFoundError(
-            "Missing required model file(s): "
-            + ", ".join(missing_files)
+            "Missing required model file(s):\n"
+            + readable_missing_files
         )
 
     with open(QUANTUM_MODEL_FILE, "rb") as file:
@@ -185,8 +194,9 @@ def load_models():
 
 def preprocess_image(image_bytes):
     """
-    Convert a validated uploaded image to training input shape:
+    Convert validated image to the exact training tensor format.
 
+    Output shape:
     (1, 1, 128, 128)
     """
 
@@ -230,13 +240,24 @@ def extract_cnn_features(backbone, image_tensor):
 
 
 # ============================================================
-# Prediction
+# Prediction pipeline
 # ============================================================
 
 def predict_chest_xray(image_bytes, model_data):
     """
-    Validate input and run:
-    Image -> CNN -> PCA -> scaling -> quantum kernel -> QSVM.
+    Full inference flow:
+
+    Image validation
+        ↓
+    CNN feature extraction
+        ↓
+    PCA reduction
+        ↓
+    Feature scaling
+        ↓
+    Quantum kernel calculation
+        ↓
+    QSVM prediction
     """
 
     is_valid, validation_message, image_info = (
@@ -267,407 +288,4 @@ def predict_chest_xray(image_bytes, model_data):
     reduced_features = reduced_features[:, :4]
 
     scaled_features = model_data["quantum_scaler"].transform(
-        reduced_features
-    )
-
-    new_quantum_kernel = (
-        model_data["quantum_kernel"].evaluate(
-            x_vec=scaled_features,
-            y_vec=model_data["quantum_train_features"]
-        )
-    )
-
-    prediction = int(
-        model_data["quantum_classifier"].predict(
-            new_quantum_kernel
-        )[0]
-    )
-
-    probabilities = (
-        model_data["quantum_classifier"].predict_proba(
-            new_quantum_kernel
-        )[0]
-    )
-
-    confidence = float(
-        np.max(probabilities)
-    )
-
-    normal_probability = float(
-        probabilities[0]
-    )
-
-    pneumonia_probability = float(
-        probabilities[1]
-    )
-
-    # Original dataset labels:
-    # 0 = Normal
-    # 1 = Pneumonia
-    if prediction == 1:
-        diagnosis = "Pneumonia"
-        priority = "urgent"
-    else:
-        diagnosis = "Normal"
-        priority = "non-urgent"
-
-    return {
-        "success": True,
-        "is_valid_xray": True,
-        "validation_message": validation_message,
-        "image_info": image_info,
-        "prediction": prediction,
-        "diagnosis": diagnosis,
-        "priority": priority,
-        "confidence": confidence,
-        "normal_probability": normal_probability,
-        "pneumonia_probability": pneumonia_probability
-    }
-
-
-# ============================================================
-# Sidebar
-# ============================================================
-
-st.sidebar.header("About This Prototype")
-
-st.sidebar.markdown("""
-- **Use case:** Chest X-ray triage
-- **Classes:** Normal vs Pneumonia
-- **Classical layer:** CNN feature extraction
-- **Quantum layer:** Quantum kernel + SVM classification
-- **Output:** Urgent / Non-urgent priority
-""")
-
-st.sidebar.warning("""
-**Research prototype only**
-
-This system is for hackathon demonstration and educational use.
-It is not a clinical diagnostic tool and must not be used for
-patient-care decisions.
-""")
-
-
-# ============================================================
-# Load trained files
-# ============================================================
-
-try:
-    with st.spinner("Loading trained CNN and quantum model..."):
-        model_data = load_models()
-
-    st.sidebar.success("✅ Model loaded successfully")
-
-except Exception as error:
-    st.sidebar.error("❌ Model loading failed")
-    st.error(
-        "Unable to load the trained model files: "
-        f"{str(error)}"
-    )
-    st.stop()
-
-
-# ============================================================
-# Main title
-# ============================================================
-
-st.title("🏥 Quantum Chest X-ray Triage System")
-
-st.markdown(
-    "**Hybrid Classical-Quantum Model for Chest X-ray "
-    "Normal vs Pneumonia Triage**"
-)
-
-
-# ============================================================
-# Upload section
-# ============================================================
-
-st.header("Upload Chest X-ray")
-
-st.info("""
-Upload only a **grayscale chest X-ray image** in PNG, JPG, or JPEG format.
-
-The input-validation layer rejects:
-- Normal colour photographs
-- Blank or very low-contrast images
-- Very low-resolution images
-- Invalid image files
-""")
-
-uploaded_file = st.file_uploader(
-    "Choose a chest X-ray image",
-    type=["png", "jpg", "jpeg"]
-)
-
-
-# ============================================================
-# Preview and prediction
-# ============================================================
-
-if uploaded_file is not None:
-    col1, col2 = st.columns(2)
-
-    with col1:
-        try:
-            uploaded_file.seek(0)
-
-            preview_image = Image.open(
-                uploaded_file
-            )
-
-            st.image(
-                preview_image,
-                caption="Uploaded Image",
-                use_container_width=True
-            )
-
-        except Exception:
-            st.error(
-                "Unable to preview this image. "
-                "Upload a valid PNG, JPG, or JPEG file."
-            )
-
-    with col2:
-        st.subheader("Input Status")
-
-        st.write(
-            f"**File name:** {uploaded_file.name}"
-        )
-
-        st.write(
-            f"**File type:** {uploaded_file.type}"
-        )
-
-        st.write(
-            f"**File size:** "
-            f"{uploaded_file.size / 1024:.1f} KB"
-        )
-
-    if st.button(
-        "🔮 Validate and Predict with Quantum AI",
-        type="primary"
-    ):
-        with st.spinner(
-            "Validating image and running quantum prediction..."
-        ):
-            try:
-                uploaded_file.seek(0)
-
-                image_bytes = uploaded_file.getvalue()
-
-                result = predict_chest_xray(
-                    image_bytes,
-                    model_data
-                )
-
-                if not result["success"]:
-                    st.error("❌ Image Rejected")
-
-                    st.warning(
-                        result.get(
-                            "error",
-                            "This image cannot be accepted for "
-                            "Chest X-ray analysis."
-                        )
-                    )
-
-                    image_info = result.get(
-                        "image_info"
-                    )
-
-                    if image_info:
-                        with st.expander(
-                            "Validation details"
-                        ):
-                            st.json(image_info)
-
-                    st.stop()
-
-                st.success(
-                    result.get(
-                        "validation_message",
-                        "Valid chest X-ray-style image accepted."
-                    )
-                )
-
-                st.divider()
-                st.subheader("AI Triage Result")
-
-                diagnosis = result["diagnosis"]
-                priority = result["priority"]
-                confidence = result["confidence"]
-
-                result_col1, result_col2 = st.columns(2)
-
-                with result_col1:
-                    if priority == "urgent":
-                        st.error(
-                            f"🚨 **URGENT:** {diagnosis}"
-                        )
-
-                        st.warning(
-                            "This image is classified as a "
-                            "pneumonia-pattern proxy. "
-                            "Prioritize radiologist review."
-                        )
-
-                    else:
-                        st.success(
-                            f"✓ **NON-URGENT:** {diagnosis}"
-                        )
-
-                        st.info(
-                            "This image is classified as "
-                            "normal by the prototype model."
-                        )
-
-                with result_col2:
-                    st.metric(
-                        "Model Confidence",
-                        f"{confidence * 100:.1f}%"
-                    )
-
-                    st.metric(
-                        "Normal Probability",
-                        f"{result['normal_probability'] * 100:.1f}%"
-                    )
-
-                    st.metric(
-                        "Pneumonia Probability",
-                        f"{result['pneumonia_probability'] * 100:.1f}%"
-                    )
-
-                image_info = result.get(
-                    "image_info"
-                )
-
-                if image_info:
-                    with st.expander(
-                        "Input Validation Details"
-                    ):
-                        st.write(
-                            f"**Image dimensions:** "
-                            f"{image_info.get('width')} × "
-                            f"{image_info.get('height')}"
-                        )
-
-                        st.write(
-                            f"**Aspect ratio:** "
-                            f"{image_info.get('aspect_ratio')}"
-                        )
-
-                        st.write(
-                            f"**Colour-channel difference:** "
-                            f"{image_info.get('channel_difference')}"
-                        )
-
-                        st.write(
-                            f"**Grayscale contrast score:** "
-                            f"{image_info.get('grayscale_std')}"
-                        )
-
-            except Exception as error:
-                st.error(
-                    f"Prediction failed: {str(error)}"
-                )
-
-
-# ============================================================
-# Demo worklist
-# ============================================================
-
-st.divider()
-st.header("📋 Radiologist Worklist — Demo View")
-
-st.caption(
-    "This is sample visual data for demonstrating priority-based "
-    "radiology workflow. It is not connected to patient records."
-)
-
-worklist_data = pd.DataFrame({
-    "Case ID": [
-        "Demo-001",
-        "Demo-002",
-        "Demo-003",
-        "Demo-004",
-        "Demo-005"
-    ],
-    "Priority": [
-        "🚨 Urgent",
-        "✓ Non-Urgent",
-        "🚨 Urgent",
-        "✓ Non-Urgent",
-        "🚨 Urgent"
-    ],
-    "Queue Time": [
-        "5 min",
-        "45 min",
-        "10 min",
-        "60 min",
-        "8 min"
-    ],
-    "Status": [
-        "Awaiting review",
-        "Routine queue",
-        "Awaiting review",
-        "Routine queue",
-        "Awaiting review"
-    ]
-})
-
-st.dataframe(
-    worklist_data,
-    use_container_width=True,
-    hide_index=True
-)
-
-
-# ============================================================
-# Pipeline explanation
-# ============================================================
-
-st.divider()
-st.header("⚛️ Hybrid Quantum Pipeline")
-
-pipeline_col1, pipeline_col2, pipeline_col3, pipeline_col4 = (
-    st.columns(4)
-)
-
-with pipeline_col1:
-    st.info(
-        "**1. Validation**\n\n"
-        "Reject non-X-ray-style images."
-    )
-
-with pipeline_col2:
-    st.info(
-        "**2. Classical CNN**\n\n"
-        "Extract image features."
-    )
-
-with pipeline_col3:
-    st.info(
-        "**3. PCA + Encoding**\n\n"
-        "Compress to four quantum inputs."
-    )
-
-with pipeline_col4:
-    st.info(
-        "**4. Quantum Kernel**\n\n"
-        "Classify Normal vs Pneumonia."
-    )
-
-
-# ============================================================
-# Footer
-# ============================================================
-
-st.markdown("---")
-
-st.markdown(
-    "**Quantum Innovation:** Hybrid CNN + PCA + quantum-kernel "
-    "classification for chest X-ray triage.  \n"
-    "**Safety Layer:** Input validation rejects obvious "
-    "non-radiology colour photos before prediction."
-)
+        red
