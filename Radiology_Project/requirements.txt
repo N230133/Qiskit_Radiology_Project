@@ -1,0 +1,12 @@
+Flask
+Flask-Cors
+gunicorn
+numpy
+Pillow
+requests
+streamlit
+pandas
+scikit-learn
+torch
+qiskit
+qiskit-machine-learning
