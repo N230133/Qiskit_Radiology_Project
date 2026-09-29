@@ -24,6 +24,7 @@ import torch.nn as nn
 from PIL import Image
 
 from image_validator import validate_chest_xray_image
+from pathlib import Path
 
 
 # ============================================================
@@ -42,11 +43,13 @@ st.set_page_config(
 # File names
 # ============================================================
 
-QUANTUM_MODEL_FILE = "quantum_model.pkl"
-PCA_MODEL_FILE = "pca_model.pkl"
-SCALED_TRAIN_FILE = "quantum_train_features_scaled.npy"
-CLASSICAL_MODEL_FILE = "classical_cnn.pth"
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+QUANTUM_MODEL_FILE = PROJECT_ROOT / "quantum_model.pkl"
+PCA_MODEL_FILE = PROJECT_ROOT / "pca_model.pkl"
+SCALED_TRAIN_FILE = PROJECT_ROOT / "quantum_train_features_scaled.npy"
+CLASSICAL_MODEL_FILE = PROJECT_ROOT / "classical_cnn.pth"
 
 # ============================================================
 # CNN architecture
